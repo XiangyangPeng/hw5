@@ -1,0 +1,179 @@
+#include <cv.h>
+#include <highgui.h>
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <cmath>
+
+using namespace std;
+using namespace cv;
+
+Mat generateFilter(Mat src,int type,int r,int n,double* PR)
+{
+	int row = src.rows;
+	int col = src.cols;
+	Mat filter(row,col,CV_32FC1,Scalar(0));
+	float dis,temp;
+	for(int i=0;i<row;i++)
+		for(int j=0;j<col;j++)
+		{
+		dis=sqrt((i-row/2)*(i-row/2)+(j-col/2)*(j-col/2));
+		switch(type)
+		{
+		case 0://BLPF
+			temp=1/(1+pow(dis/r,2*n));
+			break;
+		case 1:
+			temp=exp(pow(dis/r,2)/(-2));
+			break;
+		default:
+			temp=1;
+		}
+		filter.at<float>(i,j)=temp;
+		}
+	return filter;
+	
+}
+
+Mat BLPF(Mat image,int filterType,int k1,int k2,float& PR)
+/*
+filterType : 滤波器类型 
+	k1 : 半径 		 或者 高频强调滤波 参数k1
+	k2 : 巴特沃斯滤波器的阶数 或者 高频强调滤波 参数k2
+	PR : 功率比
+*/
+{
+	int row = image.rows;
+	int col = image.cols;
+	//0填充 + 移到中心
+	int P=2*row;
+	int Q=2*col;
+	Mat image_pad(P, Q, CV_32FC1,Scalar(0));
+		//灰度图像的显示:使用CV_8UC1，0-255 使用CV_32FC1, 0-1
+	int kk,temp;
+	for(int i=0;i<P;i++)
+		for(int j=0;j<Q;j++)
+		{
+		if((i+j)%2==0)
+			kk=1;
+		else
+			kk=-1;
+		if(i<row&&j<col)
+			temp=image.at<uchar>(i, j);
+		else
+			temp=0;
+		image_pad.at<float>(i, j)=temp*kk;			
+		}	
+	//DFT
+	Mat planes[] = {Mat_<float>(image_pad), Mat::zeros(image_pad.size(), CV_32F)}; 
+	merge(planes, 2, image_pad); //构造两个通道的输入矩阵，这里决定是进行一维DFT还是二维DFT
+	Mat image_dft;
+	dft(image_pad,image_dft);
+	//显示傅里叶幅度谱
+	split(image_dft, planes);  
+	magnitude(planes[0], planes[1], planes[0]);//计算幅度
+	Mat mag = planes[0];
+	mag += Scalar::all(1); 
+	log(mag, mag);//取对数便于显示 
+	normalize(mag, mag, 0, 1, CV_MINMAX);//标定
+	imshow("image_dft",mag);
+	waitKey(0);
+	
+	double min,max;
+	Point minLoc,maxLoc;
+	minMaxLoc(mag,&min,&max,&minLoc,&maxLoc);
+	cout<<min<<"---"<<max<<"---"<<minLoc<<"---"<<maxLoc<<endl;
+	//计算傅里叶功率谱
+	Mat power;
+	multiply(mag,mag,power);	
+	
+	//生成滤波函数
+	Mat filter(P,Q,CV_32FC1,Scalar(0));
+	float dis,temp1,sumAll=0,sum=0;
+	for(int i=0;i<P;i++)
+		for(int j=0;j<Q;j++)
+		{
+		dis=sqrt((i-row)*(i-row)+(j-col)*(j-col));
+		switch(filterType)
+		{
+		case 0://BLPF
+			temp1=1/(1+pow(dis/k1,2*k2));
+			break;
+		case 1://GLPF
+			temp1=exp(pow(dis/k1,2)/(-2));
+			break;
+		case 2://BHPF
+			temp1=1/(1+pow(k1/dis,2*k2));
+			break;
+		case 3://GHPF
+			temp1=1-exp(pow(dis/k1,2)/(-2));
+			break;
+		case 4://Laplace
+			temp1=1+4*pow(M_PI*dis,2);
+			break;
+		case 5://Unmask
+			temp1=k1+k2*(1/(1+pow(k1/dis,2*k2)));
+			break;
+		default:
+			temp1=1;
+		}
+		filter.at<float>(i,j)=temp1;
+		//计算功率比
+		sumAll+=power.at<float>(i,j);
+//if(sum<0)cout<<"fuck"<<sum<<endl;
+		if(dis<=k1&&filterType>=0&&filterType<=3)//只有BLPF GLPF BHPF GHPF才有PR
+			sum+=power.at<float>(i,j);
+		}
+	cout<<sum<<"<--->"<<sumAll<<endl;
+	PR=100*sum/sumAll;
+	//滤波
+	split(image_dft, planes); 
+	multiply(planes[0],filter,planes[0]);
+	multiply(planes[1],filter,planes[1]);
+	Mat image_after;
+	merge(planes, 2, image_after);
+	
+	//IDFT得到输出及其显示
+	Mat image_out;
+	dft(image_after,image_out,DFT_INVERSE+DFT_REAL_OUTPUT);//只取实部，避免寄生复分量
+	image_out=abs(image_out);
+	minMaxLoc(image_out,&min,&max,&minLoc,&maxLoc);
+	cout<<min<<"---"<<max<<"---"<<minLoc<<"---"<<maxLoc<<endl;
+	normalize(image_out, image_out, 0, 1, CV_MINMAX);//标定
+	Mat image_realout(image_out,Rect(0,0,row,col));//裁剪
+	imshow("image",image_realout);
+	waitKey(0);
+	
+	Mat image_got(row, col, CV_8UC1,Scalar(0));
+	for(int i=0;i<row;i++)
+	{
+		uchar* data=image_got.ptr<uchar>(i);
+		float* datar=image_realout.ptr<float>(i);
+		for(int j=0;j<col;j++)
+		{
+		data[j]=(int)(datar[j]*255);					//必须用int作类型转换;后面必须加括号
+		}
+	}
+
+	return image_got;
+}
+
+
+int main()
+{
+	//string file="/home/xyz/桌面/数字图像处理/作业/第5次作业/test3_corrupt.pgm";
+	string file="/home/xyz/桌面/数字图像处理/作业/第5次作业/test3_corrupt.pgm";
+	Mat image=imread(file,0);
+	if(!image.data)
+	{
+		printf("No image data\n");
+		return -1;
+	}
+	imshow("image_source",image);
+	waitKey(0);
+	float PR;
+	Mat image_out=BLPF(image,4,1,2,PR);//Mat BLPF(Mat image,int filterType,int k1,int k2,float* PR)
+	
+	imwrite("test3L.bmp",image_out);
+	cout<<"PR:"<<PR<<endl;
+	return 0;
+}
